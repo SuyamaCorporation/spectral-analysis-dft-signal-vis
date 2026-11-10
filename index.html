@@ -1,0 +1,389 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>離散フーリエ変換DFT信号スペクトル分析ビジュアライザー</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  canvas { image-rendering: pixelated; }
+  input[type=range] { accent-color: #818cf8; }
+</style>
+</head>
+<body class="bg-gray-950 text-gray-100 min-h-screen">
+
+<div class="max-w-6xl mx-auto px-4 py-6">
+  <h1 class="text-2xl font-bold text-indigo-400 mb-1">DFT 信号スペクトル分析ビジュアライザー</h1>
+  <p class="text-gray-400 text-sm mb-5">離散フーリエ変換 — 時間領域 / 周波数領域をリアルタイム表示</p>
+
+  <div class="grid grid-cols-1 lg:grid-cols-3 gap-4 mb-4">
+    <!-- 左: コントロール -->
+    <div class="bg-gray-900 rounded-xl p-4 border border-gray-700 space-y-4">
+      <div>
+        <p class="text-xs text-gray-400 mb-2">信号プリセット:</p>
+        <div class="grid grid-cols-3 gap-1" id="presetBtns"></div>
+      </div>
+
+      <div id="components" class="space-y-3"></div>
+
+      <button onclick="addComponent()" class="w-full py-2 text-xs bg-indigo-800 hover:bg-indigo-700 border border-indigo-600 rounded transition-colors">
+        + 成分を追加
+      </button>
+
+      <div>
+        <label class="text-xs text-gray-400 mb-1 block">サンプル数 N:</label>
+        <select id="nSamples" class="w-full bg-gray-800 border border-gray-600 rounded px-2 py-1 text-sm text-gray-200 focus:outline-none">
+          <option value="64">64</option>
+          <option value="128">128</option>
+          <option value="256" selected>256</option>
+          <option value="512">512</option>
+        </select>
+      </div>
+
+      <div id="peakInfo" class="bg-gray-800 rounded p-2 text-xs text-gray-300 space-y-1">
+        <p class="text-gray-500">ピーク周波数:</p>
+      </div>
+    </div>
+
+    <!-- 右: Canvas -->
+    <div class="lg:col-span-2 space-y-4">
+      <div class="bg-gray-900 rounded-xl p-3 border border-gray-700">
+        <p class="text-xs text-indigo-300 mb-2">時間領域（入力波形）</p>
+        <canvas id="timeDomain" class="w-full rounded bg-gray-950" height="150"></canvas>
+      </div>
+      <div class="bg-gray-900 rounded-xl p-3 border border-gray-700">
+        <p class="text-xs text-purple-300 mb-2">周波数スペクトル（DFT振幅）</p>
+        <canvas id="freqDomain" class="w-full rounded bg-gray-950" height="150"></canvas>
+      </div>
+      <div class="bg-gray-900 rounded-xl p-3 border border-gray-700">
+        <p class="text-xs text-orange-300 mb-2">位相スペクトル</p>
+        <canvas id="phaseDomain" class="w-full rounded bg-gray-950" height="100"></canvas>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+// ---- DFT Implementation ----
+function dft(signal) {
+  const N = signal.length;
+  const re = new Float64Array(N);
+  const im = new Float64Array(N);
+  for (let k = 0; k < N; k++) {
+    for (let n = 0; n < N; n++) {
+      const angle = -2 * Math.PI * k * n / N;
+      re[k] += signal[n] * Math.cos(angle);
+      im[k] += signal[n] * Math.sin(angle);
+    }
+  }
+  return { re, im };
+}
+
+// FFT Cooley-Tukey (radix-2, iterative)
+function fft(signal) {
+  const N = signal.length;
+  if (N <= 1) return { re: new Float64Array(signal), im: new Float64Array(N) };
+  if ((N & (N - 1)) !== 0) return dft(signal); // fallback if not power of 2
+
+  let re = new Float64Array(signal);
+  let im = new Float64Array(N);
+
+  // bit reversal
+  let j = 0;
+  for (let i = 1; i < N; i++) {
+    let bit = N >> 1;
+    for (; j & bit; bit >>= 1) j ^= bit;
+    j ^= bit;
+    if (i < j) {
+      [re[i], re[j]] = [re[j], re[i]];
+    }
+  }
+
+  for (let len = 2; len <= N; len <<= 1) {
+    const angle = -2 * Math.PI / len;
+    const wRe = Math.cos(angle);
+    const wIm = Math.sin(angle);
+    for (let i = 0; i < N; i += len) {
+      let curRe = 1, curIm = 0;
+      for (let k = 0; k < len >> 1; k++) {
+        const uRe = re[i+k], uIm = im[i+k];
+        const tRe = curRe * re[i+k+(len>>1)] - curIm * im[i+k+(len>>1)];
+        const tIm = curRe * im[i+k+(len>>1)] + curIm * re[i+k+(len>>1)];
+        re[i+k] = uRe + tRe;
+        im[i+k] = uIm + tIm;
+        re[i+k+(len>>1)] = uRe - tRe;
+        im[i+k+(len>>1)] = uIm - tIm;
+        const newRe = curRe * wRe - curIm * wIm;
+        curIm = curRe * wIm + curIm * wRe;
+        curRe = newRe;
+      }
+    }
+  }
+  return { re, im };
+}
+
+// ---- Signal generators ----
+let components = [];
+
+function generateSignal(N) {
+  const t = new Float64Array(N);
+  for (let i = 0; i < N; i++) t[i] = i / N;
+  const sig = new Float64Array(N);
+  components.forEach(c => {
+    for (let i = 0; i < N; i++) {
+      sig[i] += c.amp * Math.sin(2 * Math.PI * c.freq * t[i] + c.phase * Math.PI / 180);
+    }
+  });
+  return sig;
+}
+
+function squareWave(N) {
+  const sig = new Float64Array(N);
+  for (let k = 0; k < 8; k++) {
+    const freq = 2*k+1;
+    const amp = 1/(2*k+1);
+    for (let i = 0; i < N; i++) sig[i] += amp * Math.sin(2*Math.PI*freq*i/N);
+  }
+  return sig;
+}
+
+function triangleWave(N) {
+  const sig = new Float64Array(N);
+  for (let k = 0; k < 8; k++) {
+    const freq = 2*k+1;
+    const amp = 1/((2*k+1)*(2*k+1));
+    const sign = k % 2 === 0 ? 1 : -1;
+    for (let i = 0; i < N; i++) sig[i] += sign * amp * Math.sin(2*Math.PI*freq*i/N);
+  }
+  return sig;
+}
+
+function sawtoothWave(N) {
+  const sig = new Float64Array(N);
+  for (let k = 1; k <= 15; k++) {
+    for (let i = 0; i < N; i++) sig[i] += (1/k) * Math.sin(2*Math.PI*k*i/N);
+  }
+  return sig;
+}
+
+function whiteNoise(N) {
+  const sig = new Float64Array(N);
+  for (let i = 0; i < N; i++) sig[i] = (Math.random()-0.5)*2;
+  return sig;
+}
+
+let currentPreset = null;
+
+function applyPreset(name) {
+  currentPreset = name;
+  components = [];
+  if (name === '正弦波') {
+    components = [{ freq: 5, amp: 1.0, phase: 0 }];
+  } else if (name === '和音') {
+    components = [
+      { freq: 3, amp: 0.8, phase: 0 },
+      { freq: 7, amp: 0.5, phase: 45 },
+      { freq: 12, amp: 0.3, phase: 90 },
+    ];
+  }
+  renderControls();
+  update();
+}
+
+function getN() { return parseInt(document.getElementById('nSamples').value); }
+
+function getSignal() {
+  const N = getN();
+  if (currentPreset === '方形波') return squareWave(N);
+  if (currentPreset === '三角波') return triangleWave(N);
+  if (currentPreset === 'ノコギリ波') return sawtoothWave(N);
+  if (currentPreset === 'ホワイトノイズ') return whiteNoise(N);
+  return generateSignal(N);
+}
+
+// ---- Drawing ----
+function drawTimeDomain(signal) {
+  const canvas = document.getElementById('timeDomain');
+  canvas.width = canvas.offsetWidth * devicePixelRatio || 600;
+  const ctx = canvas.getContext('2d');
+  const W = canvas.width, H = canvas.height;
+  ctx.clearRect(0,0,W,H);
+
+  // grid
+  ctx.strokeStyle = '#1f2937'; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(0,H/2); ctx.lineTo(W,H/2); ctx.stroke();
+  for (let i = 0; i <= 8; i++) { const x = i*W/8; ctx.beginPath(); ctx.moveTo(x,0); ctx.lineTo(x,H); ctx.stroke(); }
+
+  const N = signal.length;
+  let minV = Infinity, maxV = -Infinity;
+  for (const v of signal) { if (v < minV) minV = v; if (v > maxV) maxV = v; }
+  const range = Math.max(maxV - minV, 0.001);
+
+  ctx.beginPath(); ctx.strokeStyle = '#818cf8'; ctx.lineWidth = 1.5 * devicePixelRatio;
+  for (let i = 0; i < N; i++) {
+    const x = i * W / N;
+    const y = H - ((signal[i] - minV) / range) * H * 0.9 - H * 0.05;
+    i === 0 ? ctx.moveTo(x,y) : ctx.lineTo(x,y);
+  }
+  ctx.stroke();
+}
+
+function drawFreqDomain(spectrum, N) {
+  const canvas = document.getElementById('freqDomain');
+  canvas.width = canvas.offsetWidth * devicePixelRatio || 600;
+  const ctx = canvas.getContext('2d');
+  const W = canvas.width, H = canvas.height;
+  ctx.clearRect(0,0,W,H);
+
+  const half = Math.floor(N/2);
+  let maxAmp = 0;
+  for (let k = 0; k < half; k++) {
+    const amp = Math.sqrt(spectrum.re[k]**2 + spectrum.im[k]**2) / N;
+    if (amp > maxAmp) maxAmp = amp;
+  }
+  maxAmp = Math.max(maxAmp, 0.001);
+
+  // grid
+  ctx.strokeStyle = '#1f2937'; ctx.lineWidth = 1;
+  for (let i = 0; i <= 8; i++) { const x = i*W/8; ctx.beginPath(); ctx.moveTo(x,0); ctx.lineTo(x,H); ctx.stroke(); }
+  ctx.beginPath(); ctx.moveTo(0,H); ctx.lineTo(W,H); ctx.stroke();
+
+  const barW = W / half;
+  const peaks = [];
+  for (let k = 1; k < half; k++) {
+    const amp = Math.sqrt(spectrum.re[k]**2 + spectrum.im[k]**2) / N;
+    const h = (amp / maxAmp) * H * 0.9;
+    const x = k * barW;
+    const grad = ctx.createLinearGradient(0, H-h, 0, H);
+    grad.addColorStop(0, '#a855f7');
+    grad.addColorStop(1, '#6366f1');
+    ctx.fillStyle = grad;
+    ctx.fillRect(x, H-h, Math.max(barW-1,1), h);
+    if (amp / maxAmp > 0.1) peaks.push({ k, amp, h });
+  }
+
+  // peak labels
+  ctx.fillStyle = '#fbbf24'; ctx.font = `${10 * devicePixelRatio}px monospace`;
+  peaks.sort((a,b) => b.amp - a.amp).slice(0,5).forEach(p => {
+    const x = p.k * barW;
+    const y = H - p.h - 4;
+    ctx.fillText(`f=${p.k}`, Math.min(x, W - 30*devicePixelRatio), Math.max(y, 10*devicePixelRatio));
+  });
+
+  updatePeakInfo(peaks.slice(0,5), N);
+}
+
+function drawPhaseDomain(spectrum, N) {
+  const canvas = document.getElementById('phaseDomain');
+  canvas.width = canvas.offsetWidth * devicePixelRatio || 600;
+  const ctx = canvas.getContext('2d');
+  const W = canvas.width, H = canvas.height;
+  ctx.clearRect(0,0,W,H);
+
+  const half = Math.floor(N/2);
+  ctx.strokeStyle = '#1f2937'; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(0,H/2); ctx.lineTo(W,H/2); ctx.stroke();
+
+  const barW = W / half;
+  for (let k = 1; k < half; k++) {
+    const amp = Math.sqrt(spectrum.re[k]**2 + spectrum.im[k]**2) / N;
+    if (amp < 0.005) continue;
+    const phase = Math.atan2(spectrum.im[k], spectrum.re[k]);
+    const h = (phase / Math.PI) * (H/2);
+    const x = k * barW;
+    ctx.fillStyle = '#f97316';
+    ctx.fillRect(x, H/2 - h, Math.max(barW-1,1), h);
+  }
+}
+
+function updatePeakInfo(peaks, N) {
+  const el = document.getElementById('peakInfo');
+  if (peaks.length === 0) { el.innerHTML = '<p class="text-gray-500">ピークなし</p>'; return; }
+  let html = '<p class="text-gray-400 mb-1">主要ピーク周波数:</p>';
+  peaks.forEach((p,i) => {
+    html += `<div class="flex justify-between"><span class="text-purple-300">f = ${p.k} bin</span><span class="text-yellow-300">${(p.amp).toFixed(4)}</span></div>`;
+  });
+  el.innerHTML = html;
+}
+
+function update() {
+  const sig = getSignal();
+  const N = sig.length;
+  const spectrum = fft(sig);
+  drawTimeDomain(sig);
+  drawFreqDomain(spectrum, N);
+  drawPhaseDomain(spectrum, N);
+}
+
+// ---- UI: component controls ----
+function renderControls() {
+  const el = document.getElementById('components');
+  el.innerHTML = '';
+  if (currentPreset && !['正弦波','和音'].includes(currentPreset)) {
+    el.innerHTML = `<p class="text-xs text-gray-500">プリセット「${currentPreset}」— 成分スライダー不使用</p>`;
+    return;
+  }
+  components.forEach((c, idx) => {
+    const div = document.createElement('div');
+    div.className = 'bg-gray-800 rounded p-2 space-y-1 relative';
+    div.innerHTML = `
+      <button onclick="removeComponent(${idx})" class="absolute top-1 right-1 text-gray-500 hover:text-red-400 text-xs">✕</button>
+      <p class="text-xs text-indigo-300 font-semibold">成分 ${idx+1}</p>
+      <div class="flex items-center gap-2">
+        <span class="text-xs text-gray-400 w-12">周波数</span>
+        <input type="range" min="1" max="30" step="1" value="${c.freq}" oninput="updateComp(${idx},'freq',+this.value);this.nextElementSibling.textContent=this.value" class="flex-1 h-2">
+        <span class="text-xs text-yellow-300 w-6">${c.freq}</span>
+      </div>
+      <div class="flex items-center gap-2">
+        <span class="text-xs text-gray-400 w-12">振幅</span>
+        <input type="range" min="0" max="2" step="0.1" value="${c.amp}" oninput="updateComp(${idx},'amp',+this.value);this.nextElementSibling.textContent=this.value.toFixed(1)" class="flex-1 h-2">
+        <span class="text-xs text-green-300 w-8">${c.amp.toFixed(1)}</span>
+      </div>
+      <div class="flex items-center gap-2">
+        <span class="text-xs text-gray-400 w-12">位相(°)</span>
+        <input type="range" min="-180" max="180" step="5" value="${c.phase}" oninput="updateComp(${idx},'phase',+this.value);this.nextElementSibling.textContent=this.value" class="flex-1 h-2">
+        <span class="text-xs text-pink-300 w-10">${c.phase}°</span>
+      </div>
+    `;
+    el.appendChild(div);
+  });
+}
+
+function updateComp(idx, key, val) {
+  components[idx][key] = val;
+  currentPreset = null;
+  update();
+}
+
+function addComponent() {
+  currentPreset = null;
+  components.push({ freq: 5, amp: 0.5, phase: 0 });
+  renderControls();
+  update();
+}
+
+function removeComponent(idx) {
+  components.splice(idx, 1);
+  renderControls();
+  update();
+}
+
+// presets
+const presetNames = ['正弦波','和音','方形波','三角波','ノコギリ波','ホワイトノイズ'];
+const presetColors = ['bg-indigo-800 hover:bg-indigo-700','bg-green-800 hover:bg-green-700','bg-orange-800 hover:bg-orange-700','bg-pink-800 hover:bg-pink-700','bg-teal-800 hover:bg-teal-700','bg-gray-700 hover:bg-gray-600'];
+const presetBtns = document.getElementById('presetBtns');
+presetNames.forEach((name,i) => {
+  const btn = document.createElement('button');
+  btn.textContent = name;
+  btn.className = `text-xs py-1.5 px-1 rounded border border-gray-600 transition-colors ${presetColors[i]}`;
+  btn.onclick = () => applyPreset(name);
+  presetBtns.appendChild(btn);
+});
+
+document.getElementById('nSamples').addEventListener('change', update);
+window.addEventListener('resize', update);
+
+applyPreset('和音');
+</script>
+</body>
+</html>
